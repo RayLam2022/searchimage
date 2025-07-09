@@ -29,6 +29,7 @@ class ImageSearchApp:
         self.thread = None
         self.search_running = False
         self.status_var = tk.StringVar(value="就绪")
+        self.current_model_name = ""
 
         self.create_widgets()
         self.load_clip_model()
@@ -49,6 +50,23 @@ class ImageSearchApp:
         # 右侧结果面板
         right_frame = ttk.Frame(paned_window)
         paned_window.add(right_frame, weight=3)
+
+        # 模型选择部分 - 新增
+        model_frame = ttk.LabelFrame(left_frame, text="模型选择")
+        model_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 模型选项
+        self.model_var = tk.StringVar(value="ViT-B/32")  # 默认模型
+        model_options = ["ViT-B/32", "ViT-B/16", "ViT-L/14", "RN50", "RN101", "RN50x4"]
+        model_dropdown = ttk.Combobox(
+            model_frame,
+            textvariable=self.model_var,
+            values=model_options,
+            state="readonly",
+        )
+        model_dropdown.pack(padx=5, pady=5, fill=tk.X)
+        model_dropdown.set("ViT-B/32")  # 设置默认值
+        model_dropdown.bind("<<ComboboxSelected>>", self.on_model_selected)
 
         # 文件夹选择部分
         folder_frame = ttk.LabelFrame(left_frame, text="文件夹设置")
@@ -223,18 +241,40 @@ class ImageSearchApp:
             widget.destroy()
         self.status_var.set("结果已清空")
 
-    def load_clip_model(self):
+    def load_clip_model(self, model_name=None):
+        if model_name is None:
+            model_name = self.model_var.get()
+
         # 在后台线程中加载CLIP模型
         self.search_btn.config(state=tk.DISABLED, text="加载模型中...")
-        threading.Thread(target=self._load_model_thread, daemon=True).start()
 
-    def _load_model_thread(self):
+        # 传递模型名给线程
+        threading.Thread(
+            target=self._load_model_thread, args=(model_name,), daemon=True
+        ).start()
+
+    def _load_model_thread(self, model_name):
         try:
-            self.model, self.preprocess = clip.load("ViT-B/32", device=self.device)
+            # 如果模型名未变，并且已经加载过，则直接返回
+            if model_name == self.current_model_name and self.model is not None:
+                self.root.after(
+                    0, lambda: self.status_var.set(f"模型已加载: {model_name}")
+                )
+                self.root.after(
+                    0, lambda: self.search_btn.config(state=tk.NORMAL, text="搜索")
+                )
+                return
+
+            # 加载新模型
+            self.model, self.preprocess = clip.load(model_name, device=self.device)
+            self.current_model_name = model_name  # 记录当前加载的模型名
+
             self.root.after(
                 0, lambda: self.search_btn.config(state=tk.NORMAL, text="搜索")
             )
-            self.root.after(0, lambda: self.status_var.set("模型加载成功"))
+            self.root.after(
+                0, lambda: self.status_var.set(f"模型加载成功: {model_name}")
+            )
         except Exception as e:
             self.root.after(
                 0, lambda: messagebox.showerror("错误", f"加载模型失败: {str(e)}")
@@ -242,6 +282,13 @@ class ImageSearchApp:
             self.root.after(
                 0, lambda: self.search_btn.config(state=tk.NORMAL, text="搜索")
             )
+
+    def on_model_selected(self, event=None):
+        """当用户选择新模型时调用"""
+        selected_model = self.model_var.get()
+        # 只有在模型名称改变时才重新加载
+        if selected_model != self.current_model_name:
+            self.load_clip_model(selected_model)
 
     def start_search(self):
         if self.search_running:
@@ -263,6 +310,15 @@ class ImageSearchApp:
 
         if self.search_mode.get() == "text" and not self.text_var.get().strip():
             messagebox.showerror("错误", "请输入搜索文本")
+            return
+
+        selected_model = self.model_var.get()
+        if selected_model != self.current_model_name:
+            self.root.after(
+                0, lambda: messagebox.showinfo("提示", "模型正在更换中，请稍等再试")
+            )
+            self.search_running = False
+            self.search_btn.config(state=tk.NORMAL, text="搜索")
             return
 
         try:
@@ -368,26 +424,20 @@ class ImageSearchApp:
     def find_files_with_ext(
         self,
         folder_root: str,
-        extensions: List[str] = [
-            ".PNG",
-            ".JPG",
-            ".JPEG",
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".webp",
-        ],
+        extensions: List[str] = [".png", ".jpg", ".jpeg", ".gif", ".webp"],
     ):
         file_list = []
         for root, dirs, files in os.walk(folder_root):
             for file in files:
-                if any(file.lower().endswith(ext) for ext in extensions):
+                # 统一转换为小写进行比较
+                file_lower = file.lower()
+                if any(file_lower.endswith(ext) for ext in extensions):
                     file_list.append(os.path.join(root, file))
         return file_list
 
     def clipv(self, root: str):
-        dimension = 512
+        dimension = self.model.visual.output_dim
+        # print(f"使用模型维度: {dimension}")
         idx_flat = faiss.IndexFlatL2(dimension)
         index = faiss.IndexIDMap(idx_flat)
 
